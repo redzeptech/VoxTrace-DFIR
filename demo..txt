@@ -1,0 +1,3 @@
+Hello, this is a sample recording for the VoxTrace-DFIR demonstration.
+This file does not contain real evidence.
+It only exists to demonstrate how the tool works.
