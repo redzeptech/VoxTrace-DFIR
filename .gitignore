@@ -1,3 +1,28 @@
+# runtime
+Outputs/
+Logs/
+Inputs/Done/
+
+# whisper outputs
+*.srt
+*.txt
+*.vtt
+*.tsv
+*.json
+*.mp3
+
+# python cache
+__pycache__/
+*.pyc
+
+# models / cache
+*.pt
+*.bin
+.cache/
+
+# windows
+Thumbs.db
+desktop.ini
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
