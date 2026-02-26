@@ -205,3 +205,24 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# runtime folders
+Inputs/
+Outputs/
+Logs/
+
+# audio/video artifacts
+*.mp3
+*.wav
+*.m4a
+*.mp4
+*.mkv
+*.mov
+*.webm
+
+# whisper outputs
+*.srt
+*.vtt
+
+# python cache
+__pycache__/
+*.pyc
