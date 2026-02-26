@@ -104,3 +104,10 @@ The user is responsible for compliance with local laws and organizational polici
 
 Recep Şenel  
 Independent DFIR & Windows Artifact Analyst
+## Demonstration
+
+### Processing
+![Processing](docs/screenshot1.png)
+
+### Generated Output
+![Output](docs/screenshot2.png)
