@@ -226,3 +226,22 @@ Logs/
 # python cache
 __pycache__/
 *.pyc
+# outputs
+Outputs/
+Logs/
+Inputs/Done/
+
+# python
+__pycache__/
+*.pyc
+
+# whisper cache
+*.pt
+*.bin
+
+# windows
+Thumbs.db
+desktop.ini
+
+# ffmpeg temp
+*.mp3
