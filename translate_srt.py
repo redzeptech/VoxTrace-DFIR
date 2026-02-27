@@ -4,10 +4,16 @@ from deep_translator import GoogleTranslator
 
 TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
 
+import os
+
 def log_line(log_path: str, msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {msg}\n")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except PermissionError:
+        alt = os.path.join(os.path.dirname(log_path), "translate_fallback.log")
+        with open(alt, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 
 def main():
     if len(sys.argv) < 6:

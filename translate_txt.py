@@ -15,11 +15,18 @@ def chunk_text(text: str, max_chars: int = 4500):
         i = j
     return chunks
 
-def log_line(log_path: str, msg: str):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {msg}\n")
+import os
 
+import os
+
+def log_line(log_path: str, msg: str):
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except PermissionError:
+        alt = os.path.join(os.path.dirname(log_path), "translate_fallback.log")
+        with open(alt, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 def main():
     if len(sys.argv) < 6:
         print("Kullanim: python translate_txt.py <input.txt> <source_lang> <target_lang> <outputs_dir> <log_path>")
