@@ -99,7 +99,13 @@ This tool is provided for legitimate research, education, and lawful digital for
 The user is responsible for compliance with local laws and organizational policies.
 
 ---
+VoxTrace is designed as a forensic helper tool, not a media utility.
 
+Evidence extraction must never stop due to auxiliary module failures
+(e.g., translation, subtitle formatting or external API problems).
+
+Core artifacts (txt, srt, json) are always generated even if optional
+processing stages fail. This behavior is intentional.
 ## Author
 
 Recep Şenel  
