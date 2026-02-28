@@ -1,3 +1,4 @@
+Keywords: DFIR, Digital Forensics, Audio Forensics, Whisper, Evidence Processing, Incident Response
 ✔ Pipeline execution verified with Stage4 completion marker (_STAGE4_OK.txt).
 # VoxTrace-DFIR
 
