@@ -1,3 +1,4 @@
+✔ Pipeline execution verified with Stage4 completion marker (_STAGE4_OK.txt).
 # VoxTrace-DFIR
 
 **Multilingual Audio Evidence Processing Toolkit for DFIR Investigations**
