@@ -1,0 +1,40 @@
+# ===== Runtime / case folders =====
+Inputs/
+Outputs/
+Logs/
+Inputs/Done/
+
+# ===== Audio / video artifacts =====
+*.mp3
+*.wav
+*.m4a
+*.mp4
+*.mkv
+*.mov
+*.webm
+
+# ===== Whisper outputs =====
+*.srt
+*.vtt
+*.tsv
+*.json
+# NOT: *.txt koymuyoruz; çok genel.
+
+# ===== Reports =====
+*.pdf
+
+# ===== Python cache / venv =====
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# ===== Model / cache =====
+*.pt
+*.bin
+.cache/
+
+# ===== Windows =====
+Thumbs.db
+desktop.ini

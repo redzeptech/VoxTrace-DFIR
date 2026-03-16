@@ -1,0 +1,5 @@
+deep-translator
+reportlab
+python-evtx
+analyzeMFT
+parseMFT
