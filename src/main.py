@@ -13,12 +13,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Proje ana dizinini (root) Python yoluna ekle
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src import __version__
 from src.core.base_collector import BaseCollector, CollectorContext, CollectorMode, utc_now_iso
 
 
 TOOL_NAME = "VoxTrace-DFIR"
 SCHEMA_VERSION = "voxtrace.run_report.v1"
+
+ASCII_BANNER = r"""
+__   __            _____                      _____  ______ _____ _____
+\ \ / /           |_   _|                    |  __ \|  ____|_   _|  __ \
+ \ V / ___ __  __   | |_ __ __ _  ___ ___    | |  | | |__    | | | |__) |
+  > < / _ \ \ \/ /   | | '__/ _` |/ __/ _ \   | |  | |  __|   | | |  _  /
+ / ^ \ (_) >  <     | | | | (_| | (_|  __/   | |__| | |     _| |_| | \ \
+/_/ \_\___/_/\_\    \_/_|  \__,_|\___\___|   |_____/|_|    |_____|_|  \_\
+"""
 
 
 def _host_info() -> dict[str, Any]:
@@ -81,38 +93,34 @@ def _discover_collectors() -> list[BaseCollector]:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(prog="voxtrace", description="VoxTrace-DFIR v0.3.0 (hybrid collector engine)")
+    ap = argparse.ArgumentParser(description="VoxTrace-DFIR v0.3.0 - Hybrid Artifact Analyzer")
 
-    mx = ap.add_mutually_exclusive_group(required=True)
-    mx.add_argument("--live", action="store_true", help="Live triage mode (collect from current host)")
-    mx.add_argument("--path", default="", help="Path analysis mode (collect/parse from a folder path)")
+    # Argüman Grupları (Cursor-friendly)
+    mode_group = ap.add_argument_group("Analysis Modes")
+    mx = mode_group.add_mutually_exclusive_group(required=False)
+    mx.add_argument("--live", action="store_true", help="Perform analysis on the current running system")
+    mx.add_argument("--path", type=str, default="", help="Analyze artifacts from a specific directory (offline image)")
 
-    ap.add_argument(
+    module_group = ap.add_argument_group("Modules")
+    module_group.add_argument("--all", action="store_true", help="Run all available modules (discovered plugins)")
+    module_group.add_argument("--evtx", action="store_true", help="Analyze Windows Event Logs (event_log_collector)")
+    module_group.add_argument("--mft", action="store_true", help="Analyze NTFS Master File Table (mft_parser)")
+
+    advanced_group = ap.add_argument_group("Advanced")
+    advanced_group.add_argument(
         "--modules",
         default="",
-        help="Comma-separated module names to run (default: all discovered)",
+        help="Comma-separated module names to run (overrides shortcuts; default: all discovered)",
     )
-    ap.add_argument(
-        "--list-modules",
-        action="store_true",
-        help="List discovered modules and exit",
-    )
-    ap.add_argument(
-        "--case",
-        default="",
-        help="Case identifier for the report (default: auto)",
-    )
-    ap.add_argument(
-        "--out",
-        default="",
-        help="Output JSON path (default: Logs/voxtrace_run_<ts>.json)",
-    )
-    ap.add_argument(
+    advanced_group.add_argument("--list-modules", action="store_true", help="List discovered modules and exit")
+    advanced_group.add_argument("--case", default="", help="Case identifier for the report (default: auto)")
+    advanced_group.add_argument("--out", default="", help="Output JSON path (default: Logs/voxtrace_run_<ts>.json)")
+    advanced_group.add_argument(
         "--output-dir",
         default="",
-        help="Output folder for module artifacts (default: Outputs/triage_<ts>/)",
+        help="Output folder for module artifacts (default: Outputs/<case>_<ts>/)",
     )
-    ap.add_argument(
+    advanced_group.add_argument(
         "--param",
         action="append",
         default=[],
@@ -143,15 +151,28 @@ async def _run(argv: list[str]) -> int:
             print(f"{c.name} v{c.version} [{'/'.join(modes) or 'none'}] {desc}".rstrip())
         return 0
 
+    print(ASCII_BANNER)
+    print(f"{'=' * 70}\n[+] VoxTrace-DFIR v{__version__} initialized.\n{'=' * 70}")
+
+    if not args.live and not args.path:
+        ap = argparse.ArgumentParser(add_help=False)
+        # Show the original parser help (best effort)
+        print("[ERROR] You must specify one analysis mode: --live or --path\n", file=sys.stderr)
+        _parse_args(["--help"])
+        return 2
+
     mode: CollectorMode = "live" if bool(args.live) else "path"
+    if mode == "live":
+        print("[!] Mode: LIVE TRIAGE. (May require Admin Privileges)")
     source_path = Path(args.path).resolve() if mode == "path" else None
     if mode == "path":
         if not args.path:
             print("[ERROR] --path requires a value", file=sys.stderr)
             return 2
         if not source_path or not source_path.exists():
-            print(f"[ERROR] path not found: {source_path}", file=sys.stderr)
+            print(f"[-] Error: Path '{source_path}' does not exist.", file=sys.stderr)
             return 2
+        print(f"[!] Mode: OFFLINE ANALYSIS. Path: {source_path}")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     case_id = (args.case or ("live" if mode == "live" else (source_path.name if source_path else "path"))).strip()
@@ -164,7 +185,21 @@ async def _run(argv: list[str]) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
-    module_filter = {m.strip() for m in str(args.modules).split(",") if m.strip()} if args.modules else None
+    # Module selection: shortcuts first, then explicit --modules (overrides).
+    module_filter: set[str] | None = None
+    if args.modules:
+        module_filter = {m.strip() for m in str(args.modules).split(",") if m.strip()}
+    else:
+        chosen: set[str] = set()
+        if bool(getattr(args, "evtx", False)):
+            chosen.add("event_log_collector")
+        if bool(getattr(args, "mft", False)):
+            chosen.add("mft_parser")
+        if chosen and not bool(getattr(args, "all", False)):
+            module_filter = chosen
+        elif bool(getattr(args, "all", False)):
+            module_filter = None  # run all discovered
+
     if module_filter:
         collectors = [c for c in collectors if c.name in module_filter]
 
@@ -237,4 +272,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
