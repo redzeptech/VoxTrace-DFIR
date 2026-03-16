@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from src.core.base_collector import BaseCollector, CollectorContext
+from src.core.base_collector import CollectorContext, PluginCollector
 
 
 def _run_cmd(cmd: list[str], timeout_s: int = 20) -> dict[str, Any]:
@@ -29,7 +29,7 @@ def _run_cmd(cmd: list[str], timeout_s: int = 20) -> dict[str, Any]:
         return {"cmd": cmd, "error": str(e)}
 
 
-class SystemInfoCollector(BaseCollector):
+class SystemInfoCollector(PluginCollector):
     name = "system_info"
     version = "0.1.0"
     description = "Collect basic live system information (Windows-friendly)."
@@ -64,6 +64,24 @@ class SystemInfoCollector(BaseCollector):
             },
         }
 
+        # Optional: psutil enrichment (dependency is lightweight and widely available)
+        try:
+            import psutil  # type: ignore
+
+            vm = psutil.virtual_memory()
+            data["psutil"] = {
+                "cpu_count_logical": psutil.cpu_count(logical=True),
+                "cpu_count_physical": psutil.cpu_count(logical=False),
+                "boot_time_utc": psutil.boot_time(),
+                "memory": {
+                    "total": int(vm.total),
+                    "available": int(vm.available),
+                    "percent": float(vm.percent),
+                },
+            }
+        except Exception:
+            pass
+
         # Windows: systeminfo provides a useful snapshot. Not always available.
         sysinfo = await asyncio.to_thread(_run_cmd, ["systeminfo"], 30)
         data["commands"] = {"systeminfo": sysinfo}
@@ -83,6 +101,6 @@ class SystemInfoCollector(BaseCollector):
         raise NotImplementedError("system_info supports only --live mode")
 
 
-def get_collector() -> BaseCollector:
+def get_collector() -> PluginCollector:
     return SystemInfoCollector()
 

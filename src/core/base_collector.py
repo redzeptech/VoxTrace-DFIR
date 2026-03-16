@@ -9,6 +9,26 @@ from typing import Any, Literal
 CollectorMode = Literal["live", "path"]
 
 
+class BaseCollector(ABC):
+    def __init__(self, mode: str = "live", source_path: str | None = None):
+        self.mode = mode
+        self.source_path = source_path
+        self.results: Any = []
+
+    @abstractmethod
+    def collect(self):
+        """Kanıt toplama mantığı (Dosya kopyalama veya ham okuma)"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def parse(self):
+        """Toplanan kanıtı analiz etme ve normalize etme"""
+        raise NotImplementedError
+
+    def get_report(self):
+        return {"module": self.__class__.__name__, "mode": self.mode, "data": self.results}
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -43,7 +63,9 @@ class CollectorContext:
             return False
         return bool(default)
 
-    def get_param_int(self, module: str, key: str, default: int, *, min_v: int | None = None, max_v: int | None = None) -> int:
+    def get_param_int(
+        self, module: str, key: str, default: int, *, min_v: int | None = None, max_v: int | None = None
+    ) -> int:
         v = self.get_param(module, key, None)
         try:
             out = int(str(v)) if v is not None else int(default)
@@ -76,13 +98,13 @@ class CollectorResult:
     error: str | None = None
 
 
-class BaseCollector(ABC):
+class PluginCollector(BaseCollector):
     """
     Plugin contract:
     - Place collectors under `src/modules/`
     - Export either:
       - `COLLECTOR = <instance>` OR
-      - `def get_collector() -> BaseCollector`
+      - `def get_collector() -> PluginCollector`
     """
 
     name: str
@@ -91,6 +113,9 @@ class BaseCollector(ABC):
 
     supports_live: bool = False
     supports_path: bool = False
+
+    def __init__(self, mode: str = "live", source_path: str | None = None):
+        super().__init__(mode=mode, source_path=source_path)
 
     def can_run(self, mode: CollectorMode) -> bool:
         return (mode == "live" and self.supports_live) or (mode == "path" and self.supports_path)
@@ -111,12 +136,17 @@ class BaseCollector(ABC):
                     error=f"collector does not support mode={ctx.mode}",
                 )
 
+            self.mode = ctx.mode
+            self.source_path = str(ctx.source_path) if ctx.source_path else None
+
             if ctx.mode == "live":
                 data = await self.collect_live(ctx)
             else:
                 if not ctx.source_path:
                     raise ValueError("source_path is required for path mode")
                 data = await self.collect_path(ctx, ctx.source_path)
+
+            self.results = data or {}
 
             return CollectorResult(
                 schema_version="voxtrace.collector_result.v1",
@@ -149,4 +179,10 @@ class BaseCollector(ABC):
     @abstractmethod
     async def collect_path(self, ctx: CollectorContext, root: Path) -> dict[str, Any]:
         raise NotImplementedError
+
+    def collect(self):
+        raise NotImplementedError("Use async collect_live/collect_path via the engine.")
+
+    def parse(self):
+        raise NotImplementedError("Use async collect_live/collect_path via the engine.")
 

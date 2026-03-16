@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import struct
 import subprocess
@@ -9,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.core.base_collector import BaseCollector, CollectorContext
+from src.core.base_collector import CollectorContext, PluginCollector
+from src.core.ntfs_mft import iter_mft_entries
 
 
 NTFS_OEM_ID = b"NTFS    "
@@ -278,61 +280,30 @@ def _dump_mft_from_raw_volume(
             "out_path": str(out_path),
         }
 
-
-def _run_parsemft(mft_path: Path, out_dir: Path, *, fmt: str, anomaly: bool, inmemory: bool) -> dict[str, Any]:
-    """
-    Uses parseMFT CLI (installed via pip as parseMFT).
-    We call it as a module when possible.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"parseMFT.{fmt}"
-
-    # parseMFT is historically a script `parseMFT.py` in the package.
-    # Try: python -m parseMFT (some installs), else python -c import.
-    flags = []
-    if fmt == "csv":
-        flags.append("-c")
-    elif fmt == "json":
-        flags.append("-j")
-    elif fmt == "timeline":
-        flags.append("-t")
-    elif fmt == "bodyfile":
-        flags.append("-b")
-    else:
-        flags.append("-c")
-        fmt = "csv"
-        out_file = out_dir / "parseMFT.csv"
-
-    if anomaly:
-        flags.append("-a")
-    if inmemory:
-        flags.append("-m")
-
-    cmd = [sys.executable, "-m", "parseMFT", *flags, "-o", os.fspath(out_file), os.fspath(mft_path)]
-    p = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
-    if p.returncode != 0:
-        # Fallback: try running parseMFT.py via import location if -m doesn't exist
-        cmd2 = [
-            sys.executable,
-            "-c",
-            "import runpy,sys; sys.argv=['parseMFT.py']+sys.argv[1:]; runpy.run_module('parseMFT', run_name='__main__')",
-            *flags,
-            "-o",
-            os.fspath(out_file),
-            os.fspath(mft_path),
-        ]
-        p2 = subprocess.run(cmd2, capture_output=True, text=True, errors="replace")
-        if p2.returncode != 0:
-            raise RuntimeError(f"parseMFT failed: rc={p.returncode} stderr={p.stderr[-400:]} | fallback rc={p2.returncode} stderr={p2.stderr[-400:]}")
-        return {"cmd": cmd2, "returncode": p2.returncode, "stdout": p2.stdout[-2000:], "stderr": p2.stderr[-2000:], "out_file": str(out_file)}
-
-    return {"cmd": cmd, "returncode": p.returncode, "stdout": p.stdout[-2000:], "stderr": p.stderr[-2000:], "out_file": str(out_file)}
+def _scan_deleted_records(mft_path: Path, *, limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for ent in iter_mft_entries(mft_path):
+        if ent.in_use:
+            continue
+        created = (ent.fn_times.get("crtime") if ent.fn_times else None) or (ent.si_times.get("crtime") if ent.si_times else None)
+        out.append(
+            {
+                "status": "DELETED",
+                "filename": ent.filename,
+                "created": created,
+                "recordnum": ent.recordnum,
+                "parent_ref": ent.parent_ref,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
 
 
-class MftCollector(BaseCollector):
+class MftCollector(PluginCollector):
     name = "mft_collector"
     version = "0.1.0"
-    description = r"Extract $MFT via raw volume access (\\.\C:) and parse via parseMFT."
+    description = r"Extract $MFT via raw volume access (\\.\C:) and emit deleted record samples (no external MFT libs)."
 
     supports_live = True
     supports_path = True
@@ -340,52 +311,50 @@ class MftCollector(BaseCollector):
     async def collect_live(self, ctx: CollectorContext) -> dict[str, Any]:
         drive = (ctx.get_param(self.name, "drive", "C") or "C").strip()
         max_bytes = ctx.get_param_int(self.name, "max_bytes", 1024 * 1024 * 1024, min_v=10 * 1024 * 1024, max_v=50 * 1024 * 1024 * 1024)
-        parse_format = (ctx.get_param(self.name, "format", "csv") or "csv").strip().lower()
-        anomaly = ctx.get_param_bool(self.name, "anomaly", default=True)
-        inmemory = ctx.get_param_bool(self.name, "inmemory", default=False)
+        limit_deleted = ctx.get_param_int(self.name, "limit_deleted", 200, min_v=1, max_v=50_000)
 
         mod_dir = ctx.ensure_module_dir(self.name)
         dumped = mod_dir / f"{drive.upper().rstrip(':')}_$MFT.raw"
         dump_info = await asyncio.to_thread(_dump_mft_from_raw_volume, drive, dumped, max_bytes=max_bytes)
-        parse_info = await asyncio.to_thread(_run_parsemft, dumped, mod_dir, fmt=parse_format, anomaly=anomaly, inmemory=inmemory)
+        deleted = await asyncio.to_thread(_scan_deleted_records, dumped, limit=limit_deleted)
+        out_json = mod_dir / "deleted_sample.json"
+        await asyncio.to_thread(out_json.write_text, json.dumps(deleted, ensure_ascii=False, indent=2), encoding="utf-8")
 
         return {
             "mode": "live",
             "config": {
                 "drive": drive,
                 "max_bytes": max_bytes,
-                "format": parse_format,
-                "anomaly": anomaly,
-                "inmemory": inmemory,
+                "limit_deleted": limit_deleted,
             },
             "dump": dump_info,
-            "parseMFT": parse_info,
+            "deleted_records_sample_count": len(deleted),
             "artifacts": {
                 "mft_dump": str(dumped),
-                "parse_output": str(parse_info.get("out_file") or ""),
+                "deleted_sample_json": str(out_json),
             },
         }
 
     async def collect_path(self, ctx: CollectorContext, root: Path) -> dict[str, Any]:
-        parse_format = (ctx.get_param(self.name, "format", "csv") or "csv").strip().lower()
-        anomaly = ctx.get_param_bool(self.name, "anomaly", default=True)
-        inmemory = ctx.get_param_bool(self.name, "inmemory", default=False)
+        limit_deleted = ctx.get_param_int(self.name, "limit_deleted", 200, min_v=1, max_v=50_000)
 
         mft = root if root.is_file() else (root / "$MFT")
         if not mft.exists():
             raise FileNotFoundError(f"$MFT not found at: {mft}")
 
         mod_dir = ctx.ensure_module_dir(self.name)
-        parse_info = await asyncio.to_thread(_run_parsemft, mft, mod_dir, fmt=parse_format, anomaly=anomaly, inmemory=inmemory)
+        deleted = await asyncio.to_thread(_scan_deleted_records, mft, limit=limit_deleted)
+        out_json = mod_dir / "deleted_sample.json"
+        await asyncio.to_thread(out_json.write_text, json.dumps(deleted, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
             "mode": "path",
-            "config": {"format": parse_format, "anomaly": anomaly, "inmemory": inmemory},
+            "config": {"limit_deleted": limit_deleted},
             "mft_path": str(mft),
-            "parseMFT": parse_info,
-            "artifacts": {"parse_output": str(parse_info.get("out_file") or "")},
+            "deleted_records_sample_count": len(deleted),
+            "artifacts": {"deleted_sample_json": str(out_json)},
         }
 
 
-def get_collector() -> BaseCollector:
+def get_collector() -> PluginCollector:
     return MftCollector()
 

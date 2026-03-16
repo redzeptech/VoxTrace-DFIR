@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.core.base_collector import BaseCollector, CollectorContext
+from src.core.base_collector import CollectorContext, PluginCollector
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -93,48 +93,35 @@ def _collect_evtx_events(evtx_module_dir: Path, *, event_ids: set[int] | None, l
 
 def _collect_mft_creates(mft_module_dir: Path, *, limit: int) -> list[tuple[datetime, dict[str, Any]]]:
     out: list[tuple[datetime, dict[str, Any]]] = []
-    # Prefer analyzeMFT chunk outputs if present
-    chunks = _iter_json_files(mft_module_dir, "analyzeMFT.json.chunk_*.json")
-    if not chunks:
-        # Fallback: use suspicious sample if available
-        sus = mft_module_dir / "suspicious_sample.json"
-        if sus.exists():
-            rows = _load_json(sus)
+    # Current pipeline writes lightweight JSON artifacts (no external MFT libs).
+    # Prefer suspicious sample if available (timestomp/future/ordering flags).
+    sus = mft_module_dir / "suspicious_sample.json"
+    if sus.exists():
+        rows = _load_json(sus)
+        if isinstance(rows, list):
             for r in rows:
+                if not isinstance(r, dict):
+                    continue
                 fn = r.get("fn_times") or {}
                 dt = _parse_dt((fn.get("crtime") if isinstance(fn, dict) else None))
                 if dt:
                     out.append((dt, r))
                     if len(out) >= limit:
-                        break
-        return out
+                        return out
 
-    for ch in chunks:
-        records = _load_json(ch)
-        if not isinstance(records, list):
-            continue
-        for r in records:
-            if not isinstance(r, dict):
-                continue
-            fn = r.get("fn_times") or {}
-            cr = fn.get("crtime") if isinstance(fn, dict) else None
-            dt = _parse_dt(cr)
-            if not dt:
-                continue
-            out.append(
-                (
-                    dt,
-                    {
-                        "recordnum": r.get("recordnum"),
-                        "filepath": r.get("filepath") or r.get("filename"),
-                        "flags": r.get("flags"),
-                        "fn_crtime": cr,
-                        "chunk_file": str(ch),
-                    },
-                )
-            )
-            if len(out) >= limit:
-                return out
+    # Fallback: deleted record samples (if produced by mft_collector)
+    deleted = mft_module_dir / "deleted_sample.json"
+    if deleted.exists():
+        rows = _load_json(deleted)
+        if isinstance(rows, list):
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                dt = _parse_dt(r.get("created"))
+                if dt:
+                    out.append((dt, r))
+                    if len(out) >= limit:
+                        return out
     return out
 
 
@@ -198,7 +185,7 @@ def _write_csv(path: Path, events: Iterable[TimelineEvent]) -> None:
             )
 
 
-class TimelineBuilderCollector(BaseCollector):
+class TimelineBuilderCollector(PluginCollector):
     name = "timeline_builder"
     version = "0.1.0"
     description = "Build a unified timeline from MFT and Event Logs (and correlate within a time window)."
@@ -279,6 +266,6 @@ class TimelineBuilderCollector(BaseCollector):
         }
 
 
-def get_collector() -> BaseCollector:
+def get_collector() -> PluginCollector:
     return TimelineBuilderCollector()
 

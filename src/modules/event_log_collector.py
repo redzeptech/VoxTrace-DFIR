@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from src.core.base_collector import BaseCollector, CollectorContext
+from src.core.base_collector import CollectorContext, PluginCollector
 
 
 def _parse_event_xml(xml_text: str) -> dict[str, Any]:
@@ -74,16 +74,17 @@ def _resolve_evtx_target(root: Path) -> Path | None:
 
 
 def _read_evtx_records(evtx_path: Path, limit: int) -> dict[str, Any]:
-    # python-evtx provides Evtx.Evtx
-    from Evtx.Evtx import Evtx  # type: ignore
-
     records: list[dict[str, Any]] = []
-    with Evtx(str(evtx_path)) as log:
-        for i, rec in enumerate(log.records()):
-            if i >= limit:
-                break
-            xml_text = rec.xml()
-            records.append(_parse_event_xml(xml_text))
+    from evtx import PyEvtxParser  # type: ignore
+
+    parser = PyEvtxParser(str(evtx_path))
+    for i, rec in enumerate(parser.records()):
+        if i >= limit:
+            break
+        xml_text = rec.get("data") or ""
+        if not xml_text:
+            continue
+        records.append(_parse_event_xml(xml_text))
 
     return {
         "target": str(evtx_path),
@@ -168,7 +169,7 @@ def _filter_records_by_event_ids(records: list[dict[str, Any]], event_ids: set[i
     return out
 
 
-class EventLogCollector(BaseCollector):
+class EventLogCollector(PluginCollector):
     name = "event_log_collector"
     version = "0.1.0"
     description = "Parse Windows EVTX (default: Security.evtx) and emit JSON records."
@@ -304,6 +305,6 @@ def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 
-def get_collector() -> BaseCollector:
+def get_collector() -> PluginCollector:
     return EventLogCollector()
 

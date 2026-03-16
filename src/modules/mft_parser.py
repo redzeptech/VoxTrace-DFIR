@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.core.base_collector import BaseCollector, CollectorContext
+from src.core.base_collector import CollectorContext, PluginCollector
+from src.core.ntfs_mft import iter_mft_entries
 
 
 FILE_RECORD_IN_USE = 0x0001
@@ -110,33 +111,16 @@ def _resolve_mft_from_path(root: Path) -> Path | None:
     return None
 
 
-def _run_analyze_mft(mft_path: Path, out_json: Path, *, chunk_size: int, profile: str) -> dict[str, Any]:
-    # Uses analyzeMFT CLI (installed via pip): python -m analyzeMFT.cli ...
-    cmd = [
-        os.fspath(Path(os.sys.executable)),
-        "-m",
-        "analyzeMFT.cli",
-        "-f",
-        os.fspath(mft_path),
-        "-o",
-        os.fspath(out_json),
-        "--json",
-        "--chunk-size",
-        str(chunk_size),
-        "--profile",
-        profile,
-    ]
-    rc, stdout, stderr = _run_cmd_bytes(cmd, timeout_s=600)
-    return {"cmd": cmd, "returncode": rc, "stdout": stdout[-2000:], "stderr": stderr[-2000:]}
-
-
-def _iter_chunk_json_files(out_json: Path) -> list[Path]:
-    # analyzeMFT writes chunk files as: <output>.chunk_N.json
-    return sorted(out_json.parent.glob(out_json.name + ".chunk_*.json"), key=lambda p: p.name.lower())
-
-
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+def _entry_to_record_dict(ent) -> dict[str, Any]:
+    return {
+        "recordnum": ent.recordnum,
+        "filename": ent.filename,
+        "filepath": ent.filename,
+        "flags": ent.flags,
+        "parent_ref": ent.parent_ref,
+        "si_times": ent.si_times,
+        "fn_times": ent.fn_times,
+    }
 
 
 def _summarize_records(
@@ -307,7 +291,7 @@ def _summarize_batch(
     return counts, list(summary.get("suspicious_sample") or [])
 
 
-class MftParserCollector(BaseCollector):
+class MftParserCollector(PluginCollector):
     name = "mft_parser"
     version = "0.1.0"
     description = "Parse NTFS $MFT (path mode from copied file; live mode via VSS snapshot)."
@@ -352,130 +336,33 @@ class MftParserCollector(BaseCollector):
         future_skew_seconds = ctx.get_param_int(self.name, "future_skew_seconds", 3600, min_v=0, max_v=10_000_000)
         max_suspicious = ctx.get_param_int(self.name, "max_suspicious", 200, min_v=0, max_v=5000)
         write_csv = ctx.get_param_bool(self.name, "write_csv", default=True)
-        mp_enabled = ctx.get_param_bool(self.name, "multiprocessing", default=True)
-        mp_records_per_task = ctx.get_param_int(self.name, "mp_records_per_task", 100_000, min_v=10_000, max_v=5_000_000)
-        mp_workers = ctx.get_param_int(self.name, "mp_workers", (os.cpu_count() or 4), min_v=1, max_v=128)
-        process_chunk_files_limit = ctx.get_param_int(self.name, "process_chunk_files_limit", 50, min_v=0, max_v=1_000_000)
+        max_records = ctx.get_param_int(self.name, "max_records", 500_000, min_v=1, max_v=50_000_000)
 
         mod_dir = ctx.ensure_module_dir(self.name)
-        out_json = mod_dir / "analyzeMFT.json"
-
-        cmdres = await asyncio.to_thread(_run_analyze_mft, mft_path, out_json, chunk_size=chunk_size, profile=profile)
-        if int(cmdres.get("returncode") or 1) != 0:
-            raise RuntimeError(f"analyzeMFT failed: {cmdres}")
-
-        chunk_files = _iter_chunk_json_files(out_json)
-        if process_chunk_files_limit > 0:
-            chunk_files = chunk_files[:process_chunk_files_limit]
-
-        # Summarize without loading everything into one list.
+        # Build a lightweight record list from raw $MFT parsing (no external MFT libs).
+        records: list[dict[str, Any]] = []
         total = deleted = dirs = files = 0
-        suspicious_all: list[dict[str, Any]] = []
-
-        async def handle_records(records: list[dict[str, Any]]) -> None:
-            nonlocal total, deleted, dirs, files, suspicious_all
-            part = _summarize_records(
-                [records],
-                timestomp_threshold_seconds=timestomp_threshold_seconds,
-                future_skew_seconds=future_skew_seconds,
-                ordering_threshold_seconds=ordering_threshold_seconds,
-                max_suspicious=max_suspicious,
-            )
-            total += int(part.get("total_records_seen") or 0)
-            deleted += int(part.get("deleted_records_seen") or 0)
-            dirs += int(part.get("directories_seen") or 0)
-            files += int(part.get("files_seen") or 0)
-            suspicious_all.extend(list(part.get("suspicious_sample") or []))
-
-        if chunk_files:
-            # Read each chunk file and process in batches of mp_records_per_task.
-            if mp_enabled:
-                from concurrent.futures import ProcessPoolExecutor
-                import heapq
-
-                def _score(r: dict[str, Any]) -> int:
-                    try:
-                        return int(r.get("score") or 0)
-                    except Exception:
-                        return 0
-
-                loop = asyncio.get_running_loop()
-                with ProcessPoolExecutor(max_workers=mp_workers) as ex:
-                    futures = []
-                    for p in chunk_files:
-                        records = await asyncio.to_thread(_load_json, p)
-                        if not isinstance(records, list):
-                            continue
-                        # split into ~100k-sized tasks
-                        batch: list[dict[str, Any]] = []
-                        for item in records:
-                            if isinstance(item, dict):
-                                batch.append(item)
-                            if len(batch) >= mp_records_per_task:
-                                futures.append(
-                                    loop.run_in_executor(
-                                        ex,
-                                        _summarize_batch,
-                                        batch,
-                                        timestomp_threshold_seconds,
-                                        future_skew_seconds,
-                                        ordering_threshold_seconds,
-                                        max_suspicious,
-                                    )
-                                )
-                                batch = []
-                        if batch:
-                            futures.append(
-                                loop.run_in_executor(
-                                    ex,
-                                    _summarize_batch,
-                                    batch,
-                                    timestomp_threshold_seconds,
-                                    future_skew_seconds,
-                                    ordering_threshold_seconds,
-                                    max_suspicious,
-                                )
-                            )
-
-                    for fut in await asyncio.gather(*futures):
-                        counts, sus = fut
-                        total += counts["total"]
-                        deleted += counts["deleted"]
-                        dirs += counts["dirs"]
-                        files += counts["files"]
-                        suspicious_all.extend(sus)
-
-                # keep only top max_suspicious overall
-                if max_suspicious > 0 and suspicious_all:
-                    suspicious_all = heapq.nlargest(max_suspicious, suspicious_all, key=_score)
+        for ent in iter_mft_entries(mft_path, max_records=max_records):
+            total += 1
+            if not ent.in_use:
+                deleted += 1
+            if ent.is_directory:
+                dirs += 1
             else:
-                for p in chunk_files:
-                    records = await asyncio.to_thread(_load_json, p)
-                    if isinstance(records, list):
-                        # split but single-process
-                        batch: list[dict[str, Any]] = []
-                        for item in records:
-                            if isinstance(item, dict):
-                                batch.append(item)
-                            if len(batch) >= mp_records_per_task:
-                                await handle_records(batch)
-                                batch = []
-                        if batch:
-                            await handle_records(batch)
-        elif out_json.exists():
-            # Fallback: may be a full JSON dump of MftRecord __dict__ (less ideal)
-            raw = await asyncio.to_thread(_load_json, out_json)
-            if isinstance(raw, list):
-                await handle_records([r for r in raw if isinstance(r, dict)])
+                files += 1
+            records.append(_entry_to_record_dict(ent))
 
-        summary = {
-            "total_records_seen": total,
-            "deleted_records_seen": deleted,
-            "directories_seen": dirs,
-            "files_seen": files,
-            "suspicious_sample": suspicious_all,
-            "suspicious_sample_count": len(suspicious_all),
-        }
+        summary = _summarize_records(
+            [records],
+            timestomp_threshold_seconds=timestomp_threshold_seconds,
+            future_skew_seconds=future_skew_seconds,
+            ordering_threshold_seconds=ordering_threshold_seconds,
+            max_suspicious=max_suspicious,
+        )
+        summary["total_records_seen"] = total
+        summary["deleted_records_seen"] = deleted
+        summary["directories_seen"] = dirs
+        summary["files_seen"] = files
 
         suspicious_path = mod_dir / "suspicious_sample.json"
         suspicious_csv_path = mod_dir / "suspicious_sample.csv"
@@ -489,11 +376,6 @@ class MftParserCollector(BaseCollector):
 
         return {
             "mft_path": str(mft_path),
-            "analyzeMFT": {
-                "output_json": str(out_json),
-                "chunk_files_count": len(chunk_files),
-                "cmd": cmdres.get("cmd"),
-            },
             "config": {
                 "profile": profile,
                 "chunk_size": chunk_size,
@@ -502,20 +384,16 @@ class MftParserCollector(BaseCollector):
                 "future_skew_seconds": future_skew_seconds,
                 "max_suspicious": max_suspicious,
                 "write_csv": write_csv,
-                "multiprocessing": mp_enabled,
-                "mp_records_per_task": mp_records_per_task,
-                "mp_workers": mp_workers,
-                "process_chunk_files_limit": process_chunk_files_limit,
+                "max_records": max_records,
             },
             "summary": summary,
             "artifacts": {
-                "analyzeMFT_json": str(out_json),
                 "suspicious_sample_json": str(suspicious_path),
                 "suspicious_sample_csv": (str(suspicious_csv_path) if write_csv else None),
             },
         }
 
 
-def get_collector() -> BaseCollector:
+def get_collector() -> PluginCollector:
     return MftParserCollector()
 

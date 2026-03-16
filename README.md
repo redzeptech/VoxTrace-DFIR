@@ -101,6 +101,7 @@ For artifact analysis runs (v0.3.0 collector engine), the tool generates:
 - Whisper installed
 - NVIDIA GPU (recommended)
 - `pip install -r requirements.txt`
+- For legacy translation scripts (TXT/SRT): `pip install -r requirements-media.txt`
 
 ---
 
@@ -109,7 +110,7 @@ For artifact analysis runs (v0.3.0 collector engine), the tool generates:
 - **Media**:
   - FFmpeg for audio extraction/normalization
   - OpenAI Whisper for speech-to-text (CUDA supported)
-  - `deep-translator` for translation (TXT/SRT)
+  - Translation scripts (TXT/SRT) use `deep-translator` (see `requirements-media.txt`)
 - **Artifact Analysis (v0.3.0)**:
   - **EVTX**: built-in collectors parse `.evtx` and can also use Windows-native `wevtutil` in live mode  
     - Optional high-performance **Rust-based EVTX engine**: `evtx_dump` (Rust) / `pyevtx-rs` bindings (if installed externally). This is compatible with the plugin design as an alternate backend.

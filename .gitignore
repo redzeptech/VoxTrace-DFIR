@@ -1,10 +1,26 @@
+# .gitignore
+
+# ===== Python env / cache =====
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+
 # ===== Runtime / case folders =====
-Inputs/
 Outputs/
 Logs/
-Inputs/Done/
+temp_audio/
 
-# ===== Audio / video artifacts =====
+# Keep folder structure without evidence
+Inputs/*
+!Inputs/.gitkeep
+
+# ===== DFIR artifacts (avoid repo bloat) =====
+*.evtx
+*.mft
+
+# ===== Audio / video artifacts (avoid evidence leakage) =====
 *.mp3
 *.wav
 *.m4a
@@ -22,13 +38,6 @@ Inputs/Done/
 
 # ===== Reports =====
 *.pdf
-
-# ===== Python cache / venv =====
-__pycache__/
-*.pyc
-.venv/
-venv/
-.env
 
 # ===== Model / cache =====
 *.pt

@@ -18,6 +18,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import __version__
 from src.core.base_collector import BaseCollector, CollectorContext, CollectorMode, utc_now_iso
+from src.core.timeline_engine import TimelineEngine
+from src.utils.report_gen import PDFReporter
+from src.modules.registry_scanner import RegistryScanner
+from src.modules.mft_scanner import MFTScanner
 
 
 TOOL_NAME = "VoxTrace-DFIR"
@@ -103,8 +107,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
     module_group = ap.add_argument_group("Modules")
     module_group.add_argument("--all", action="store_true", help="Run all available modules (discovered plugins)")
-    module_group.add_argument("--evtx", action="store_true", help="Analyze Windows Event Logs (event_log_collector)")
-    module_group.add_argument("--mft", action="store_true", help="Analyze NTFS Master File Table (mft_parser)")
+    module_group.add_argument("--evtx", action="store_true", help="Analyze Windows Event Logs (EVTX Scanner)")
+    module_group.add_argument("--mft", action="store_true", help="Deep scan Master File Table for deleted/hidden files")
+    module_group.add_argument("--registry", action="store_true", help="Analyze Windows Registry (USB, Persistence, etc.)")
 
     advanced_group = ap.add_argument_group("Advanced")
     advanced_group.add_argument(
@@ -192,9 +197,11 @@ async def _run(argv: list[str]) -> int:
     else:
         chosen: set[str] = set()
         if bool(getattr(args, "evtx", False)):
-            chosen.add("event_log_collector")
+            chosen.add("evtx_scanner")
         if bool(getattr(args, "mft", False)):
-            chosen.add("mft_parser")
+            chosen.add("mft_scanner")
+        if bool(getattr(args, "registry", False)):
+            chosen.add("registry_scanner")
         if chosen and not bool(getattr(args, "all", False)):
             module_filter = chosen
         elif bool(getattr(args, "all", False)):
@@ -202,6 +209,13 @@ async def _run(argv: list[str]) -> int:
 
     if module_filter:
         collectors = [c for c in collectors if c.name in module_filter]
+
+    if bool(getattr(args, "evtx", False)) or bool(getattr(args, "all", False)):
+        print("[>] Running EVTX Parser...")
+    if bool(getattr(args, "registry", False)) or bool(getattr(args, "all", False)):
+        print("[>] Running Registry Scanner...")
+    if bool(getattr(args, "mft", False)) or bool(getattr(args, "all", False)):
+        print("[>] Running MFT Deep Dive...")
 
     params: dict[str, dict[str, str]] = {}
     for raw in args.param or []:
@@ -234,6 +248,10 @@ async def _run(argv: list[str]) -> int:
     started_at = utc_now_iso()
     results = []
     errors: list[str] = []
+    evtx_scanner_result: dict[str, Any] | None = None
+    registry_scanner_result: dict[str, Any] | None = None
+    mft_scanner_result: list[Any] | None = None
+    audio_forensics_result: dict[str, Any] | None = None
     for c in collectors:
         if not c.can_run(mode):
             continue
@@ -241,6 +259,40 @@ async def _run(argv: list[str]) -> int:
         results.append(asdict(r))
         if r.status == "error" and r.error:
             errors.append(f"{c.name}: {r.error}")
+        if r.module == "evtx_scanner" and r.status == "ok":
+            evtx_scanner_result = r.data
+        if r.module == "registry_scanner" and r.status == "ok":
+            registry_scanner_result = r.data
+        if r.module == "mft_scanner" and r.status == "ok":
+            # mft_scanner returns a list (meta + deleted hits)
+            mft_scanner_result = r.data  # type: ignore[assignment]
+        if r.module == "audio_forensics" and r.status == "ok":
+            audio_forensics_result = r.data
+
+    # TimelineEngine integration (aggregate module outputs)
+    timeline = TimelineEngine()
+    if evtx_scanner_result and isinstance(evtx_scanner_result, dict):
+        evtx_results = evtx_scanner_result.get("critical_hits") or []
+        if isinstance(evtx_results, list):
+            timeline.add_events([e for e in evtx_results if isinstance(e, dict)], "Windows Event Log")
+
+    if registry_scanner_result and isinstance(registry_scanner_result, dict):
+        reg_results = registry_scanner_result.get("usb_devices") or []
+        if isinstance(reg_results, list):
+            timeline.add_events([e for e in reg_results if isinstance(e, dict)], "Registry/USB")
+
+    if audio_forensics_result and isinstance(audio_forensics_result, dict):
+        audio_results = audio_forensics_result.get("segments") or []
+        if isinstance(audio_results, list):
+            timeline.add_events([e for e in audio_results if isinstance(e, dict)], "Audio Evidence")
+
+    if mft_scanner_result and isinstance(mft_scanner_result, list):
+        timeline.add_events([e for e in mft_scanner_result if isinstance(e, dict)], "MFT/Deleted")
+
+    final_timeline = timeline.generate_sorted_timeline()
+    timeline_path = output_dir / "timeline_master.json"
+    if final_timeline:
+        timeline_path.write_text(json.dumps(final_timeline, ensure_ascii=False, indent=2), encoding="utf-8")
 
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -257,10 +309,82 @@ async def _run(argv: list[str]) -> int:
         "output_dir": str(output_dir),
         "modules": results,
         "errors": errors,
+        "timeline": {
+            "events_count": len(final_timeline),
+            "path": (str(timeline_path) if final_timeline else None),
+        },
     }
 
     out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[OK] Wrote: {out_json}")
+
+    # Pretty EVTX output + optional PDF report generation
+    if evtx_scanner_result and isinstance(evtx_scanner_result, dict):
+        try:
+            total = int(evtx_scanner_result.get("total_logs_found") or 0)
+        except Exception:
+            total = 0
+        files = evtx_scanner_result.get("files") or []
+        if isinstance(files, list):
+            files_str = ", ".join(str(x) for x in files if x)
+        else:
+            files_str = ""
+        print(f"[+] Found {total} EVTX files.")
+        if files_str:
+            print(f"[+] Sample logs: {files_str}")
+
+        show_findings = bool(getattr(args, "evtx", False)) and not bool(getattr(args, "all", False))
+        hits = evtx_scanner_result.get("critical_hits") or []
+        if show_findings:
+            errs = evtx_scanner_result.get("errors") or []
+            if errs:
+                print("\n[!] EVTX WARNINGS:")
+                print("-" * 50)
+                if isinstance(errs, list):
+                    for e in errs:
+                        print(f"- {e}")
+                else:
+                    print(f"- {errs}")
+
+            if isinstance(hits, list) and hits:
+                print(f"\n[!] FINDINGS ({len(hits)} Critical Events):")
+                print("-" * 50)
+                for event in hits:
+                    if not isinstance(event, dict):
+                        continue
+                    ts = event.get("timestamp") or "N/A"
+                    eid = event.get("event_id") or "N/A"
+                    desc = event.get("description") or ""
+                    print(f"[{str(ts)[:19]}] ID: {eid} - {desc}")
+            else:
+                print("\n[!] FINDINGS (0 Critical Events):")
+                print("-" * 50)
+                print("No critical events captured (try running as Administrator for Security.evtx).")
+
+        # Auto PDF report generation (after analysis)
+        if bool(getattr(args, "evtx", False)) or bool(getattr(args, "all", False)):
+            if isinstance(hits, list) and hits:
+                Path("Outputs").mkdir(parents=True, exist_ok=True)
+                report_name = f"VoxTrace_Report_{datetime.now().strftime('%H%M%S')}.pdf"
+                reporter = PDFReporter(Path("Outputs") / report_name)
+                reporter.generate(hits)
+
+    # Registry console summary (USBSTOR)
+    show_registry = bool(getattr(args, "registry", False)) and not bool(getattr(args, "all", False))
+    if registry_scanner_result and isinstance(registry_scanner_result, dict) and show_registry:
+        usb_devices = registry_scanner_result.get("usb_devices") or []
+        if isinstance(usb_devices, list):
+            for item in usb_devices:
+                if isinstance(item, dict) and "id" in item:
+                    print(f"[+] USB Device Detected: {item['id']}")
+
+    # MFT console summary (deleted records)
+    show_mft = bool(getattr(args, "mft", False)) and not bool(getattr(args, "all", False))
+    if show_mft and isinstance(mft_scanner_result, list):
+        for item in mft_scanner_result:
+            if isinstance(item, dict) and "status" in item:
+                print(f"[!] {item['status']} File Found: {item.get('filename')} (Created: {item.get('created')})")
+
     return 0 if not errors else 1
 
 
