@@ -91,6 +91,13 @@ def _shorten(s: str, n: int) -> str:
     return s[: n - 1] + "…"
 
 
+def _mask_path(s: str) -> str:
+    """C:\\Users\\KullaniciAdi -> C:\\Users\\[USER]"""
+    if not s:
+        return s
+    return re.sub(r"(?i)([A-Z]:\\Users\\)[^\\/]+", r"\1[USER]", str(s))
+
+
 def _build_pdf(
     *,
     out_pdf: Path,
@@ -157,11 +164,11 @@ def _build_pdf(
     story.append(Spacer(1, 10))
     story.append(Paragraph(f"<b>Case</b>: {case_name}", body))
     story.append(Paragraph(f"<b>Generated</b>: {time.strftime('%Y-%m-%d %H:%M:%S')}", body))
-    story.append(Paragraph(f"<b>Output directory</b>: {output_dir}", body))
+    story.append(Paragraph(f"<b>Output directory</b>: {_mask_path(str(output_dir))}", body))
     if run_log:
-        story.append(Paragraph(f"<b>Run log</b>: {run_log}", body))
+        story.append(Paragraph(f"<b>Run log</b>: {_mask_path(str(run_log))}", body))
     if threat_intel_json:
-        story.append(Paragraph(f"<b>Threat Intel</b>: {threat_intel_json}", body))
+        story.append(Paragraph(f"<b>Threat Intel</b>: {_mask_path(str(threat_intel_json))}", body))
     story.append(Spacer(1, 12))
 
     # --- Artifacts
@@ -212,14 +219,14 @@ def _build_pdf(
                 body,
             )
         )
-        if ti_meta:
-            story.append(
-                Paragraph(
-                    f"<b>Public IP only</b>: {ti_meta.get('public_ips_only')} — "
-                    f"<b>Scanned path</b>: {_shorten(str(ti_meta.get('scanned_path') or ''), 120)}",
-                    body,
-                )
+    if ti_meta:
+        story.append(
+            Paragraph(
+                f"<b>Public IP only</b>: {ti_meta.get('public_ips_only')} — "
+                f"<b>Scanned path</b>: {_shorten(_mask_path(str(ti_meta.get('scanned_path') or '')), 120)}",
+                body,
             )
+        )
 
         # Show top findings first
         def score_key(r: FindingRow) -> tuple[int, int, int]:
@@ -232,7 +239,7 @@ def _build_pdf(
             if r.sources:
                 src = f"{len(r.sources)} file(s)"
                 if len(r.sources) <= 2:
-                    src += " — " + "; ".join(Path(s).name for s in r.sources)
+                    src += " — " + "; ".join(Path(_mask_path(s)).name for s in r.sources)
             data.append(
                 [
                     _shorten(r.indicator, 48),

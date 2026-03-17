@@ -192,9 +192,25 @@ All module outputs are aggregated into a single JSON report with a stable schema
 
 1. Place evidence files inside `Inputs/`
 2. Run:
-tools\calistir.bat
-
+   - `.\run.ps1` (PowerShell) veya `calistir.bat` (Batch)
 3. Results appear in `Outputs/<filename>/`
+
+### Güvenlik / Gizlilik Parametreleri (run.ps1)
+
+| Parametre | Açıklama |
+|-----------|----------|
+| `-MaskSensitive` | Transcription çıktılarında telefon numarası ve e-posta adreslerini `***` ile maskeler |
+| `-NoCleanup` | İşlem sonrası temp klasörlerini temizlemez (varsayılan: temizlenir) |
+
+Örnek:
+```powershell
+.\run.ps1 -MaskSensitive
+```
+
+Otomatik uygulanan iyileştirmeler:
+- **Dosya yolu maskeleme**: Log ve raporlarda `C:\Users\KullaniciAdi` → `C:\Users\[USER]`
+- **Metadata temizliği**: TXT/SRT/VTT dosyalarının başı/sonundaki sistem bilgisi kaldırılır
+- **Temp temizliği**: İşlem sonrası `temp_audio/` ve `%TEMP%\voxtrace_*` otomatik silinir
 
 ---
 
