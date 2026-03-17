@@ -1,49 +1,6 @@
-# .gitignore
-
-# ===== Python env / cache =====
-venv/
-.venv/
-__pycache__/
-*.pyc
-.env
-
-# ===== Runtime / case folders =====
-Outputs/
-Logs/
-temp_audio/
-
-# Keep folder structure without evidence
-Inputs/*
-!Inputs/.gitkeep
-
-# ===== DFIR artifacts (avoid repo bloat) =====
-*.evtx
-*.mft
-
-# ===== Audio / video artifacts (avoid evidence leakage) =====
-*.mp3
-*.wav
-*.m4a
-*.mp4
-*.mkv
-*.mov
-*.webm
-
-# ===== Whisper outputs =====
-*.srt
-*.vtt
-*.tsv
-*.json
-# NOT: *.txt koymuyoruz; çok genel.
-
-# ===== Reports =====
-*.pdf
-
-# ===== Model / cache =====
-*.pt
-*.bin
-.cache/
-
-# ===== Windows =====
-Thumbs.db
-desktop.ini
+﻿Vaka Analizleri/
+logs/
+temp/
+results/
+*.log
+.vscode/
